@@ -1,0 +1,4 @@
+checkpoint_path : "./QAT_DVSNet_best.pth"
+channels : 32
+time_step : 16
+num_classes : 9

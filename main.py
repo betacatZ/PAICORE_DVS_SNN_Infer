@@ -10,7 +10,8 @@ from torchvision import transforms
 from quantize.qat_model import QAT_DVSNet
 import cv2
 from threading import Thread
-
+import argparse
+import yaml
 # cv2.setUseOptimized(True)  # 启用IPP优化
 # cv2.setNumThreads(4)  # 根据CPU核心数设置
 
@@ -26,10 +27,56 @@ idx_to_class = [
     "waving",
 ]
 
+config_parser = parser = argparse.ArgumentParser(description="Training Config", add_help=False)
+parser.add_argument(
+    "-c",
+    "--config",
+    default="args.yml",
+    type=str,
+    metavar="FILE",
+    help="YAML config file specifying default arguments",
+)  # imagenet.yml  cifar10.yml
+parser = argparse.ArgumentParser(description="PyTorch args")
+parser.add_argument(
+    "-T",
+    "--time-step",
+    type=int,
+    default=16,
+    metavar="time",
+    help="simulation time step of spiking neuron (default: 4)",
+)
+parser.add_argument(
+    "--num-classes", type=int, default=9, metavar="N", help="number of label classes (Model default if None)"
+)
+parser.add_argument(
+    "--checkpoint_path",
+    default="",
+    type=str,
+    metavar="PATH",
+    help="Resume full model and optimizer state from checkpoint (default: none)",
+)
+parser.add_argument("--channels", default=32, help="channels")
+
+
+def _parse_args():
+    # Do we have a config file to parse?
+    args_config, remaining = config_parser.parse_known_args()
+    if args_config.config:
+        with open(args_config.config, "r") as f:
+            cfg = yaml.safe_load(f)
+            parser.set_defaults(**cfg)
+
+    # The main arg parser parses the rest of the args, the usual
+    # defaults will have been overridden if config file specified.
+    args = parser.parse_args(remaining)
+
+    # Cache the args as a text string to save them in the output dir later
+    args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
+    return args, args_text
+
 
 def infer_thread(model, frames, device):
     Thread(target=infer, args=(model, device, frames)).start()
-
 
 def manage_folder(folder="./data", max_files=15):
     """智能文件夹管理（自动清理旧文件）"""
@@ -118,7 +165,7 @@ def infer(model, device, frames):
     # save_np_frames_as_png(frames, "./cc1111")
 
 
-def DVS_PAIBOX_infer_sim(camera_name, duration, model, device):
+def DVS_PAIBOX_infer_sim(camera_name, duration, model, time_step, device):
     try:
         # 初始化相机连接
         camera = dv.io.CameraCapture(camera_name)
@@ -136,16 +183,12 @@ def DVS_PAIBOX_infer_sim(camera_name, duration, model, device):
             # 读取事件数据
             events = camera.getNextEventBatch()
             if events is not None:
-                start = time.perf_counter()
                 filter = dv.noise.BackgroundActivityNoiseFilter(
                     (346, 260), backgroundActivityDuration=timedelta(milliseconds=1)
                 )
                 filter.accept(events)
                 filtered = filter.generateEvents()
                 buffer.add(filtered)
-                end = time.perf_counter()
-                elapsed_microseconds = (end - start) * 1e3
-                # print(f"事件处理耗时: {elapsed_microseconds:.3f} 毫秒")
 
             current_time = time.monotonic()
             elapsed = current_time - start_time
@@ -167,10 +210,10 @@ def DVS_PAIBOX_infer_sim(camera_name, duration, model, device):
 
                     # 执行时间切片
                     window = buffer.sliceTime(start_timestamp, end_timestamp)
-                    
+
                     start = time.perf_counter()
 
-                    frames = convert_event_files_to_frames(16, 260, 346, window)
+                    frames = convert_event_files_to_frames(time_step, 260, 346, window)
 
                     end = time.perf_counter()
                     elapsed_microseconds = (end - start) * 1e3
@@ -195,12 +238,16 @@ def DVS_PAIBOX_infer_sim(camera_name, duration, model, device):
 
 
 def main():
-    model = QAT_DVSNet(w_bits=8, channels=32, n_cls=9)
+    args, args_text = _parse_args()
+
+    checkpoint = torch.load(args.checkpoint_path, map_location="cpu")
+    model = QAT_DVSNet(w_bits=8, channels=args.channels, n_cls=args.num_classes)
+    model.load_state_dict(checkpoint["model"])
     functional.set_step_mode(model, "m")
-    device = torch.device("cuda")
+    device = torch.device("cpu")
     model.to(device)
     # DAVIS346_00000595
-    DVS_PAIBOX_infer_sim("DAVIS346_00000595", None, model, device)
+    DVS_PAIBOX_infer_sim("DAVIS346_00000595", None, model, args.time_step, device)
 
 
 if __name__ == "__main__":
