@@ -13,6 +13,7 @@ from threading import Thread
 import argparse
 import yaml
 import paibox as pb
+from paiboard import PAIBoard_SIM
 # cv2.setUseOptimized(True)  # 启用IPP优化
 # cv2.setNumThreads(4)  # 根据CPU核心数设置
 
@@ -132,32 +133,35 @@ def dynamic_display_last_frame(frames, window_name="Event Frame"):
 def infer(model, pb_model_fc, fc_head, param_dict, device, frames):
     # frames = convert_aedat_files_to_frames(aedat4_file, 16, 260, 346)
     start = time.perf_counter()
-    total_pb_out = np.array([])
+    # total_pb_out = np.array([])
     image = resize_128_128(frames)
-    sim = pb.Simulator(pb_model_fc)
+    # sim = pb.Simulator(pb_model_fc)
     image: functional.Tensor = image.transpose(0, 1).to(device, non_blocking=True)
     with torch.no_grad():
         conv_feature, output = model(image)
+        
+        total_pb_out = pb_model_fc(conv_feature)
+        total_pb_out = torch.tensor(total_pb_out).unsqueeze(1).to(torch.float32)
+        # for t, feature in enumerate(conv_feature):
+        #     feature = feature.squeeze()  # torch.Size([1024])
+        #     feature = feature.numpy().astype(np.uint8)
+        #     pb_model_fc.inp.input = feature
+        #     sim.run(1 + (0 if t + 1 != param_dict["timestep"] else param_dict["delay"]))
 
-        for t, feature in enumerate(conv_feature):
-            feature = feature.squeeze()  # torch.Size([1024])
-            feature = feature.numpy().astype(np.uint8)
-            pb_model_fc.inp.input = feature
-            sim.run(1 + (0 if t + 1 != param_dict["timestep"] else param_dict["delay"]))
+        # total_pb_out = sim.data[pb_model_fc.probe1].astype(np.float32)
+        # total_pb_out = total_pb_out[param_dict["delay"] :]
+        # total_pb_out = torch.tensor(total_pb_out).unsqueeze(1)
 
-            total_pb_out = sim.data[pb_model_fc.probe1].astype(np.float32)
-            total_pb_out = total_pb_out[param_dict["delay"] :]
-            total_pb_out = torch.tensor(total_pb_out).unsqueeze(1)
-
-            fc_out = fc_head.fc_block(total_pb_out)
-            out = fc_head.head(fc_out.mean(0))
-        sim.reset()
+        fc_out = fc_head.fc_block(total_pb_out)
+        out = fc_head.head(fc_out.mean(0))
+        # sim.reset()
         functional.reset_net(fc_head)
         functional.reset_net(model)
     end = time.perf_counter()
     elapsed_microseconds = (end - start) * 1e3
     print(f"推理耗时: {elapsed_microseconds:.3f} 毫秒")
-    print("cls:", idx_to_class[out.argmax().int()])
+    cls = idx_to_class[out.argmax().int()]
+    print(f"cls:{cls}\n")
     # print("cls:", idx_to_class[output.argmax().int()])
     # save_np_frames_as_png(frames, "./cc1111")
 
@@ -239,18 +243,25 @@ def main():
     print(args)
     checkpoint = torch.load(args.checkpoint_path, map_location="cpu")
     param_dict = getNetParam(checkpoint, args.time_step, 1)
-    
+    baseDir = "./mapper/"
+
+    pb_model_fc = PAIBoard_SIM(baseDir, args.time_step, layer_num=1)
+    pb_model_fc.chip_init([(1, 0), (0, 0), (1, 1), (0, 1)])
+    pb_model_fc.config(oFrmNum=10000)
+
     model = QAT_DVSNet(w_bits=8, channels=args.channels, n_cls=args.num_classes)
-    pb_model_fc = PAIBOX_DVSNet_FC(
-        inp_shape=256,
-        param_dict=param_dict,
-        w_bits=8,
-    )
-    if args.mapper:
-        mapper = pb.Mapper()
-        mapper.build(pb_model_fc)
-        graph_info = mapper.compile(core_estimate_only=False, weight_bit_optimization=True, grouping_optim_target="both")
-        mapper.export(write_to_file=True, fp="./mapper/", format="bin", split_by_chip=False, use_hw_sim=True)
+    # pb_model_fc = PAIBOX_DVSNet_FC(
+    #     inp_shape=256,
+    #     param_dict=param_dict,
+    #     w_bits=8,
+    # )
+    # if args.mapper:
+    #     mapper = pb.Mapper()
+    #     mapper.build(pb_model_fc)
+    #     graph_info = mapper.compile(
+    #         core_estimate_only=False, weight_bit_optimization=True, grouping_optim_target="both"
+    #     )
+    #     mapper.export(write_to_file=True, fp="./mapper/", format="bin", split_by_chip=False, use_hw_sim=True)
 
     fc_head = FC_Head.from_qat_checkpoint(args.checkpoint_path, n_cls=args.num_classes)
     model.load_state_dict(checkpoint["model"])

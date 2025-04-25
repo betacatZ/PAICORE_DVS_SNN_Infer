@@ -4,6 +4,7 @@ import torch.nn as nn
 from copy import deepcopy
 from spikingjelly.activation_based import functional, surrogate, neuron, layer
 import paibox as pb
+
 # from timm.models.registry import register_model
 from .qat_quantize_layer import Quan_Conv2d, Quan_Linear, WeightQuantizer
 
@@ -124,10 +125,9 @@ class PAIBOX_DVSNet_FC(pb.Network):
         ]
         prev_fc = self.inp
         for i, snn_layer in enumerate(fc_layers):
-            print(snn_layer)
             fc_n = pb.LIF(
                 fc_layers_config[i]["out_size"],
-                threshold=param_dict["vthr"],
+                threshold=127,
                 reset_v=0,
                 tick_wait_start=tick_wait_start,
             )
@@ -157,6 +157,54 @@ class PAIBOX_DVSNet_FC(pb.Network):
         if key:
             layer_list = [elem for elem in layer_list if key in elem]
         return layer_list
+
+
+class FC_Head(nn.Module):
+    def __init__(self, n_cls):
+        """
+        Final classification head split into fc_block and head layers.
+
+        Args:
+            n_cls (int): Number of output classes.
+        """
+        super().__init__()
+        self.fc_block = nn.Sequential(
+            layer.Linear(256, 176, bias=False),
+            layer.Dropout(0.5),
+        )
+        self.head = layer.Linear(176, n_cls, bias=False)
+
+    def forward(self, x):
+        x = self.fc_block(x)
+        x_mean = x.mean(0)  # mean over time steps
+        return self.head(x_mean)
+
+    @classmethod
+    def from_qat_checkpoint(cls, checkpoint_path, n_cls):
+        """
+        Load FC_Head from a QAT_DVSNet checkpoint.
+
+        Args:
+            checkpoint_path (str): Path to the QAT_DVSNet state_dict.
+            n_cls (int): Number of output classes.
+
+        Returns:
+            FC_Head: Initialized and weight-loaded FC_Head instance.
+        """
+        state_dict = torch.load(checkpoint_path, map_location="cpu")['model']
+        
+        # Extract and rename relevant parameters
+        fc_head_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith("fc."):
+                fc_head_state_dict["fc_block." + k[len("fc.") :]] = v
+            elif k.startswith("head."):
+                fc_head_state_dict["head." + k[len("head.") :]] = v
+
+        # Create instance and load state dict
+        model = cls(n_cls)
+        model.load_state_dict(fc_head_state_dict)
+        return model
 
 
 # @register_model

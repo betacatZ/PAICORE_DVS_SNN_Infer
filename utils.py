@@ -14,6 +14,13 @@ import torch
 from dv import AedatFile
 import time
 
+def getNetParam(param_dict, timestep, delay):
+    # layer_num = sum(1 for key in param_dict["model"] if "weight" in key)
+    # delay = layer_num - 1
+    param_dict["timestep"] = timestep
+    param_dict["delay"] = delay
+    param_dict["vthr"] = 127
+    return param_dict
 
 def filter_and_save_events(
     input_path: str, output_path: str, resolution: tuple, noise_duration_ms: int = 1, event_stream_name: str = "events"
